@@ -64,8 +64,8 @@ suffix = [".jpg", ".png", ".gif"]
 
 checkImg :: Text -> ServerMsg
 checkImg img = if T.drop (T.length img - 4) img `Prelude.elem` suffix
-                  then PIC img
-                  else ERROR
+                  then packp img
+                  else err
 
 parsePic :: Text -> IO ServerMsg
 parsePic url = 
@@ -74,9 +74,9 @@ parsePic url =
              case par of
                Left  e -> do
                  print (e :: HttpException)
-                 return ERROR
+                 return err
                Right _ -> return $ checkImg url
-     else return ERROR
+     else return err
 
 transM :: ServerMsg -> TL.Text
 transM s = case s of
@@ -94,8 +94,10 @@ type MsgCache    = [ServerMsg]
 newServerState :: ServerState
 newServerState = []
 
+
 newMsgCache :: MsgCache
 newMsgCache = []
+
 
 clientExists :: Client
              -> ServerState
@@ -150,9 +152,9 @@ app :: MVar ServerState
     -> MVar MsgCache
     -> WS.ServerApp
 app state msgs pending = do
-  conn <- WS.acceptRequest pending
+  conn    <- WS.acceptRequest pending
   WS.forkPingThread conn 30             -- ensure the connection stays alive
-  (msg :: Text) <- WS.receiveData conn
+  msg     <- WS.receiveData conn
   clients <- readMVar state
   m'      <- readMVar msgs
   case msg of
@@ -164,17 +166,16 @@ app state msgs pending = do
             WS.sendTextData conn (userList s')
             WS.sendTextData conn (cacheMsg m')
             broadcast (packt (msg `mappend` " joined")) s'
-            broadcast (packj msg) s        -- user list request for joining
+            broadcast (packj msg) s   -- user list request for joining
             return s'
           talk conn state msgs client
         where
           client     = (msg, conn)
           disconnect = do
-            broadcast (packl msg) clients  -- user list request for leaving
             s <- modifyMVar state $ \s ->
               let s' = removeClient client s in return (s', s')
             broadcast (packt $ fst client `mappend` " disconnected") s
-           
+            broadcast (packl msg) s   -- user list request for leaving
 
 
 talk :: WS.Connection
@@ -197,5 +198,3 @@ talk conn state msgs (user, _) = forever $ do
      else do readMVar state >>= broadcast (packs [msg', packp msg])
              print (packp msg)
              modifyMVar_ msgs $ \x -> return $ addMsg (packp msg) x
-      
- 
