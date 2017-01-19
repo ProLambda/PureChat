@@ -2,28 +2,94 @@
 -- https://github.com/jaspervdj/websockets
 --------------------------------------------------------------------------------
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DeriveGeneric     #-}
 
 module Main where
 
 --------------------------------------------------------------------------------
-import Control.Monad.IO.Class
-import Control.Concurrent           (MVar, forkIO, newMVar, modifyMVar_,
-                                     modifyMVar, readMVar, threadDelay)
-import Control.Monad                (forM_, forever)
-import Control.Exception            (finally)
-import Data.Monoid                  (mappend)
-import Data.Text                    as T hiding (map, filter, any)
-import Data.Time.Clock
-import qualified Data.Text.Lazy     as TL
-import qualified Network.WebSockets as WS
-import Database.Message
+import  Control.Monad.IO.Class
+import  Control.Concurrent           (MVar, forkIO, newMVar, modifyMVar_,
+                                      modifyMVar, readMVar, threadDelay)
+import  Control.Monad                (forM_, forever)
+import  Control.Exception            (finally, try)
+import  Data.Monoid                  (mappend)
+import  Data.Text                    as T hiding (map, filter, any)
+import  Data.Time.Clock
+import  qualified Data.Text.Lazy     as TL
+import  qualified Network.WebSockets as WS
+import  Data.ByteString.Lazy         as L hiding (map, filter, any)
+import  Database.Message
+import  GHC.Generics
+import  Data.Aeson
+import  Network.HTTP.Client          (parseRequest, HttpException)
+--------------------------------------------------------------------------------
+
+data ServerMsg = TEXT Text | PIC Text | JOIN Text | LEAVE Text |
+                 ERROR     | LIST [ServerMsg]
+  deriving (Generic, Show, Eq)
+
+instance ToJSON ServerMsg where
+  toEncoding = genericToEncoding defaultOptions
+
+instance FromJSON ServerMsg
+
+packt :: Text -> ServerMsg
+packt = TEXT
+
+packp :: Text -> ServerMsg
+packp = PIC
+
+packj :: Text -> ServerMsg
+packj = JOIN
+
+packl :: Text -> ServerMsg
+packl = LEAVE 
+
+packs :: [ServerMsg] -> ServerMsg
+packs = LIST
+
+err :: ServerMsg
+err = ERROR
+
+userList :: [Client] -> L.ByteString
+userList [] = ""
+userList xs = encode . packs $ map (packj . fst) xs
+
+cacheMsg :: [ServerMsg] -> L.ByteString
+cacheMsg [] = ""
+cacheMsg xs = encode $ packs xs
+
+suffix :: [Text]
+suffix = [".jpg", ".png", ".gif"]
+
+checkImg :: Text -> ServerMsg
+checkImg img = if T.drop (T.length img - 4) img `Prelude.elem` suffix
+                  then PIC img
+                  else ERROR
+
+parsePic :: Text -> IO ServerMsg
+parsePic url = 
+  if T.take 4 url == "http"
+     then do par <- try . parseRequest $ T.unpack url
+             case par of
+               Left  e -> do
+                 print (e :: HttpException)
+                 return ERROR
+               Right _ -> return $ checkImg url
+     else return ERROR
+
+transM :: ServerMsg -> TL.Text
+transM s = case s of
+             TEXT t -> TL.fromStrict t
+             PIC  p -> TL.fromStrict p
+             _      -> ""
 --------------------------------------------------------------------------------
 
 type Client      = (Text, WS.Connection)
 
 type ServerState = [Client]
 
-type MsgCache    = [TL.Text]
+type MsgCache    = [ServerMsg]
 
 newServerState :: ServerState
 newServerState = []
@@ -43,7 +109,7 @@ addClient :: Client
 addClient client clients = client : clients
 
 
-addMsg :: TL.Text
+addMsg :: ServerMsg
        -> MsgCache
        -> MsgCache
 addMsg msg [] = [msg]
@@ -56,18 +122,18 @@ removeClient :: Client
 removeClient client = filter ((/= fst client) . fst)
 
 
-broadcast :: Text
+broadcast :: ServerMsg
           -> ServerState
           -> IO ()
-broadcast message clients = 
-  forM_ clients $ \(_, conn) -> WS.sendTextData conn message
+broadcast message clients =
+  forM_ clients $ \(_, conn) -> WS.sendTextData conn (encode message)
 
 
 loop :: MVar MsgCache
      -> IO ()
 loop msgc = do
   msgs <- readMVar msgc
-  updateMes msgs
+  updateMes (filter (/= "") $ map transM msgs)
   modifyMVar_ msgc $ \_ -> return newMsgCache -- clean cache
   threadDelay $ 3600 * 1000000                -- per hour
   
@@ -88,23 +154,27 @@ app state msgs pending = do
   WS.forkPingThread conn 30             -- ensure the connection stays alive
   (msg :: Text) <- WS.receiveData conn
   clients <- readMVar state
+  m'      <- readMVar msgs
   case msg of
     _ | clientExists client clients ->
-          WS.sendTextData conn ("User already exists" :: Text)
-      | otherwise -> flip finally disconnect $ do
+          WS.sendTextData conn (encode $ packt "User already exists")
+      | otherwise -> flip finally disconnect $ do    
           modifyMVar_ state $ \s -> do
             let s' = addClient client s
-            WS.sendTextData conn $
-              "Hello! Users: " `mappend` T.intercalate ", " (map fst s)
-            broadcast (fst client `mappend` " joined") s'
+            WS.sendTextData conn (userList s')
+            WS.sendTextData conn (cacheMsg m')
+            broadcast (packt (msg `mappend` " joined")) s'
+            broadcast (packj msg) s        -- user list request for joining
             return s'
           talk conn state msgs client
         where
           client     = (msg, conn)
           disconnect = do
+            broadcast (packl msg) clients  -- user list request for leaving
             s <- modifyMVar state $ \s ->
               let s' = removeClient client s in return (s', s')
-            broadcast (fst client `mappend` " disconnected") s
+            broadcast (packt $ fst client `mappend` " disconnected") s
+           
 
 
 talk :: WS.Connection
@@ -114,8 +184,18 @@ talk :: WS.Connection
      -> IO ()
 talk conn state msgs (user, _) = forever $ do
   msg <- WS.receiveData conn
-  ct  <- liftIO $ getCurrentTime
+  par <- parsePic msg
+  ct  <- liftIO getCurrentTime
   let time = T.drop 11 $ T.take 16 $ T.pack $ show ct
-      msg' = user `mappend` "@" `mappend` time `mappend` ": " `mappend` msg
-  modifyMVar_ msgs $ \x -> return $ addMsg (TL.fromStrict msg') x
-  readMVar state >>= broadcast msg'
+      temp = user `mappend` "@" `mappend` time `mappend` ": "
+      msg' = if par == err
+                then packt (temp `mappend` msg)
+                else packt temp
+  modifyMVar_ msgs $ \x -> return $ addMsg msg' x
+  if par == err
+     then    readMVar state >>= broadcast msg'
+     else do readMVar state >>= broadcast (packs [msg', packp msg])
+             print (packp msg)
+             modifyMVar_ msgs $ \x -> return $ addMsg (packp msg) x
+      
+ 
