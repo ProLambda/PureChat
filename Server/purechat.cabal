@@ -17,6 +17,9 @@ executable          pure
     build-depends:  base   >= 4      && < 5
                   , text
                   , time
+                  , aeson
+                  , http-client
+                  , bytestring
                   , persistent
                   , persistent-template
                   , persistent-sqlite
