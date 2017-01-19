@@ -4,6 +4,11 @@
 
 (require json)
 
+(define (index-of l x)
+  (for/or ([y l] [i (in-naturals)] #:when (equal? x y)) i))
+
+(define xxx "ccc")
+
 ;; view of chatroom
 
 (define (xgap p size)
@@ -16,6 +21,16 @@
        [min-height size]
        [stretchable-height #f]))
 
+(define chatroom-box-frame%
+  (class frame%
+    (super-new)
+    (field [myclose #f])
+    (define/public (set-onclose! callback)
+      (set! myclose callback))
+    (define (on-close)
+      (myclose))
+    (augment on-close)))
+
 (define chatroom-box%
   (class object% (super-new)
     
@@ -24,7 +39,8 @@
            [ mysendlock #f ]
            [ myframe #f]
            [ mytext1 #f]
-           [ myinput #f])
+           [ myinput #f]
+           [ myonlines #f])
 
     (define/public (submit button event)
       (when (eq? (send event get-event-type) 'text-field-enter)
@@ -37,10 +53,10 @@
           (send myinput set-value ""))))
     
     (define/public (frame-make)
-      (let* ([myframe (new frame% [label "PureChat 0.01"])]
+      (let* ([frame (new chatroom-box-frame% [label "PureChat 0.01"])]
          
              ;; big grid
-             [p1 (new horizontal-panel% [parent myframe]
+             [p1 (new horizontal-panel% [parent frame]
                       [alignment `(left top)])]
          
              [g1 (xgap p1 20)]
@@ -72,15 +88,16 @@
              [g7 (ygap p12 10)]
              [onlines (new list-box% [parent p12]
                            [label "Onlines"]
-                           [choices `("abc" "dde" "fff")]
-                           [style `(single vertical-label)]
+                           [choices `()]
+                           [style `(single vertical-label variable-columns)]
                            [min-width 150]
                            [stretchable-width #f])]
             
              [g8 (ygap p12 10)])
-        (set! myframe myframe)
+        (set! myframe frame)
         (set! mytext1 text1)
         (set! myinput input)
+        (set! myonlines onlines)
         (send textarea set-editor text1)
         (send text1 lock #t)
         (send myframe show #t)))
@@ -115,14 +132,19 @@
                     (send mytext1 insert "  " pos)
                     (send mytext1 lock #t))))))
 
-    (define/public (user-leave who)
-      (display "::: LEAVE ::: ")
-      (displayln who))
-
+    (define/public (set-onclose! callback)
+      (send myframe set-onclose! callback))
 
     (define/public (user-join who)
-      (display "::: JOIN ::: ")
-      (displayln who))
+      (send myonlines append who who))
+    
+    (define/public (user-leave who)
+      (let* ([n (send myonlines get-number)]
+             [index (index-of (map (lambda (i)
+                              (send myonlines get-data i))
+                            (range n))
+                              who)])
+        (send myonlines delete index)))
 
     (define/public (show b)
       (send myframe show b))
@@ -179,7 +201,7 @@
   (let* ([tag (hash-ref data `tag)])
     (cond
         [(equal? tag "TEXT") (send x add-message-line (hash-ref data `contents))]
-        [(equal? tag "PIC") (send x add-message-imageurl (hash-ref data `contents))]
+        ;;[(equal? tag "PIC") (send x add-message-imageurl (hash-ref data `contents))]
         [(equal? tag "JOIN") (send x user-join (hash-ref data `contents))]
         [(equal? tag "LEAVE") (send x user-leave (hash-ref data `contents))]
         [(equal? tag "LIST") (for-each (lambda (m)
@@ -187,7 +209,6 @@
                                 (hash-ref data `contents))])))
 
 (define (purechat-handler3 x username message)
-  (displayln message)
   (unless (string? message)
     (displayln "EOF")
     (sleep 1))
@@ -201,8 +222,23 @@
   (send x frame-make)
   (send x set-onsubmit! (lambda (input)                               
                           (ws-send! c input)))
+  (send x set-onclose! (lambda ()
+                         (ws-close! c)
+                         (displayln ":: CLOSE ::")))
   (chatroom-reader-bind c username (lambda (message)
                                      (purechat-handler3 x username message))))
+
+(define (chatroom-go2)
+  (define x (new chatroom-box%))
+  (send x set-username username)
+  (send x frame-make)
+  (send x set-onsubmit! (lambda (input)                               
+                          (ws-send! c input)))
+  (send x set-onclose! (lambda ()
+                         (ws-close! c)
+                         (displayln ":: CLOSE ::")))
+  (send x user-join "abc")
+  (send x user-leave "abc"))
 
 ;;;;;;;;;;;;;;;;;;;;
 
