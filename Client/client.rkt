@@ -163,7 +163,7 @@
 
 (require net/rfc6455)
 (require net/url)
-(define c (ws-connect (string->url "ws://sapphiresoft.io:8888/")))
+(define c (ws-connect (string->url "ws://cynzknbjztylgytp.onion/")))
 
 (define (chatroom-reader-bind c username callback)
   (ws-send! c (string-append username))
