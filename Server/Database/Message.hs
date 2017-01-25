@@ -20,21 +20,19 @@ getIndex :: UTCTime
 getIndex t = T.pack $ take 10 $ show t
 
 
-updateMes :: [T.Text]
+updateMes :: [(T.Text, T.Text)]
           -> IO ()
 updateMes text = runSqlite confAddr $ do
   runMigration migrateAll
-  time <- liftIO $ getCurrentTime
+  time <- liftIO getCurrentTime
   let index = getIndex time
   query <- getBy $ UniqueD index
   case query of
     Nothing -> do
-      _ <- insert $ Message index (map trans text)
+      _ <- insert $ Message index text
       return ()
     Just (Entity uid (Message _ mess)) ->
-      update uid [MessageMess =. (map trans text) ++ mess]
-    where
-      trans x = (x, "")
+      update uid [MessageMess =. text ++ mess]
 
 
 getTextM :: T.Text
@@ -45,4 +43,3 @@ getTextM time = runSqlite confAddr $ do
   case x of
     Nothing -> return []
     Just (Entity _ (Message _ xs)) -> return $ map fst xs
-  
