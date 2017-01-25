@@ -8,23 +8,23 @@ module Main where
 
 --------------------------------------------------------------------------------
 import  Control.Monad.IO.Class
-import  Control.Concurrent           (MVar, forkIO, newMVar, modifyMVar_,
-                                      modifyMVar, readMVar, threadDelay)
-import  Control.Monad                (forM_, forever)
-import  Control.Exception            (finally, try)
-import  Data.Monoid                  (mappend)
-import  Data.Text                    as T hiding (map, filter, any)
+import  Control.Concurrent            (MVar, forkIO, newMVar, modifyMVar_,
+                                       modifyMVar, readMVar, threadDelay)
+import  Control.Monad                 (forM_, forever)
+import  Control.Exception             (finally, try)
+import  Data.Monoid                   (mappend)
+import  Data.Text                     as T hiding (map, filter, any)
 import  Data.Time.Clock
-import  qualified Data.Text.Lazy     as TL
-import  qualified Network.WebSockets as WS
-import  Data.ByteString.Lazy         as L hiding (map, filter, any)
+import  qualified Data.Text.Lazy      as TL
+import  qualified Network.WebSockets  as WS
+import  Data.ByteString.Lazy          as L hiding (map, filter, any)
 import  Database.Message
 import  GHC.Generics
 import  Data.Aeson
-import  Network.HTTP.Client          (parseRequest, HttpException)
+import  Network.HTTP.Client           (parseRequest, HttpException)
 --------------------------------------------------------------------------------
 
-data ServerMsg = TEXT Text | PIC Text | JOIN Text | LEAVE Text |
+data ServerMsg = TEXT Text | PIC Text Text | JOIN Text | LEAVE Text |
                  ERROR     | LIST [ServerMsg]
   deriving (Generic, Show, Eq)
 
@@ -36,7 +36,7 @@ instance FromJSON ServerMsg
 packt :: Text -> ServerMsg
 packt = TEXT
 
-packp :: Text -> ServerMsg
+packp :: Text -> Text -> ServerMsg
 packp = PIC
 
 packj :: Text -> ServerMsg
@@ -62,27 +62,28 @@ cacheMsg xs = encode $ packs xs
 suffix :: [Text]
 suffix = [".jpg", ".png", ".gif"]
 
-checkImg :: Text -> ServerMsg
-checkImg img = if T.drop (T.length img - 4) img `Prelude.elem` suffix
-                  then packp img
+checkImg :: Text -> Text -> ServerMsg
+checkImg pre img = if T.drop (T.length img - 4) img `Prelude.elem` suffix
+                  then packp pre img
                   else err
 
-parsePic :: Text -> IO ServerMsg
-parsePic url = 
+parsePic :: Text -> Text -> IO ServerMsg
+parsePic pre url = 
   if T.take 4 url == "http"
      then do par <- try . parseRequest $ T.unpack url
              case par of
                Left  e -> do
                  print (e :: HttpException)
                  return err
-               Right _ -> return $ checkImg url
+               Right _ -> return $ checkImg pre url
      else return err
 
-transM :: ServerMsg -> TL.Text
+transM :: ServerMsg -> (TL.Text,  -- message
+                        TL.Text)  -- pic url
 transM s = case s of
-             TEXT t -> TL.fromStrict t
-             PIC  p -> TL.fromStrict p
-             _      -> ""
+             TEXT t   -> (TL.fromStrict t, "")
+             PIC  p u -> (TL.fromStrict p, TL.fromStrict u)
+             _        -> ("", "")
 --------------------------------------------------------------------------------
 
 type Client      = (Text, WS.Connection)
@@ -135,7 +136,7 @@ loop :: MVar MsgCache
      -> IO ()
 loop msgc = do
   msgs <- readMVar msgc
-  updateMes (filter (/= "") $ map transM msgs)
+  updateMes (filter ((/= "") . fst) $ map transM msgs)
   modifyMVar_ msgc $ \_ -> return newMsgCache -- clean cache
   threadDelay $ 3600 * 1000000                -- per hour
   
@@ -185,16 +186,15 @@ talk :: WS.Connection
      -> IO ()
 talk conn state msgs (user, _) = forever $ do
   msg <- WS.receiveData conn
-  par <- parsePic msg
   ct  <- liftIO getCurrentTime
   let time = T.drop 11 $ T.take 16 $ T.pack $ show ct
-      temp = user `mappend` "@" `mappend` time `mappend` ": "
-      msg' = if par == err
-                then packt (temp `mappend` msg)
-                else packt temp
+      pref = user `mappend` "@" `mappend` time `mappend` ": "
+  par <- parsePic pref msg
+  let msg' = if par == err
+                then packt (pref `mappend` msg)
+                else packt pref
   modifyMVar_ msgs $ \x -> return $ addMsg msg' x
   if par == err
      then    readMVar state >>= broadcast msg'
-     else do readMVar state >>= broadcast (packs [msg', packp msg])
-             print (packp msg)
-             modifyMVar_ msgs $ \x -> return $ addMsg (packp msg) x
+     else do readMVar state >>= broadcast (packp pref msg)
+             modifyMVar_ msgs $ \x -> return $ addMsg (packp pref msg) x
