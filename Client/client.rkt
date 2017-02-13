@@ -4,6 +4,7 @@
 
 (require json)
 
+
 (define (index-of l x)
   (for/or ([y l] [i (in-naturals)] #:when (equal? x y)) i))
 
@@ -201,7 +202,10 @@
   (let* ([tag (hash-ref data `tag)])
     (cond
         [(equal? tag "TEXT") (send x add-message-line (hash-ref data `contents))]
-        ;;[(equal? tag "PIC") (send x add-message-imageurl (hash-ref data `contents))]
+        [(equal? tag "PIC")
+         (let ([p (hash-ref data `contents)])
+           ;;(displayln data)
+           (send x add-message-imageurl (car p) (car (cdr p)) ))]
         [(equal? tag "JOIN") (send x user-join (hash-ref data `contents))]
         [(equal? tag "LEAVE") (send x user-leave (hash-ref data `contents))]
         [(equal? tag "LIST") (for-each (lambda (m)
@@ -264,6 +268,7 @@
  
 ; Show the dialog
 (send dialog show #t)
+
 
 ;(set! username "guest")
 ;(chatroom-go)
